@@ -33,7 +33,8 @@ Optionally, you may need to rebuild the [Protocol
 Buffer](https://developers.google.com/protocol-buffers) Python module:
 
     $ curl -JLO https://raw.githubusercontent.com/signalapp/Signal-Android/master/app/src/main/proto/Backups.proto
-    $ protoc -I=. --python_out=. Backups.proto
+    $ curl -JLO https://raw.githubusercontent.com/signalapp/Signal-Android/master/app/src/main/proto/Database.proto
+    $ protoc -I=. --python_out=. Backups.proto Database.proto
 
 
 Usage
