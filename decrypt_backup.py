@@ -304,6 +304,8 @@ def decrypt_backup(
 
     with preferences_filename.open("w") as pf:
         json.dump(preferences, pf)
+    print(keyValue)
+    breakpoint()
     with keyValue_filename.open("w") as kv:
         json.dump(keyValue, kv)
 
