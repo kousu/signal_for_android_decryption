@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Unofficial Signal for Android backup file decryption utility.
 
@@ -20,6 +22,8 @@ import getpass
 
 from pathlib import Path
 
+import warnings
+
 from argparse import ArgumentParser, FileType
 
 from cryptography.hazmat.primitives.hashes import Hash, SHA256, SHA512
@@ -35,12 +39,7 @@ from cryptography.hazmat.primitives.ciphers.modes import CTR
 from Backups_pb2 import BackupFrame, SqlStatement  # type: ignore
 
 
-class HeaderData(NamedTuple):
-    initialisation_vector: bytes  # 16 bytes
-    salt: bytes
-
-
-def read_backup_header(backup_file: BinaryIO) -> HeaderData:
+def read_backup_header(backup_file: BinaryIO) -> BackupFrame:
     """Read the header from the start of a Signal backup file."""
     length = struct.unpack(">I", backup_file.read(4))[0]
     backup_frame = BackupFrame.FromString(backup_file.read(length))
@@ -48,11 +47,9 @@ def read_backup_header(backup_file: BinaryIO) -> HeaderData:
     assert backup_frame.HasField("header")
     assert backup_frame.header.HasField("iv")
     assert backup_frame.header.HasField("salt")
+    
+    return backup_frame
 
-    return HeaderData(
-        initialisation_vector=backup_frame.header.iv,
-        salt=backup_frame.header.salt,
-    )
 
 
 class Keys(NamedTuple):
@@ -111,12 +108,15 @@ def decrypt_frame(
     hmac.update(ciphertext)
     our_mac = hmac.finalize()
     if their_mac != our_mac[: len(their_mac)]:
+        print("cars")
+        breakpoint()
         raise MACMismatchError()
 
     cipher = Cipher(algorithm=AES(cipher_key), mode=CTR(initialisation_vector))
     decryptor = cipher.decryptor()
     frame_bytes = decryptor.update(ciphertext) + decryptor.finalize()
 
+    print(len(frame_bytes), frame_bytes)
     return BackupFrame.FromString(frame_bytes)
 
 
@@ -131,6 +131,8 @@ def decrypt_frame_payload(
     """
     Decrypt an encrypted binary payload from the backup file in ``chunk_size`` chunks.
     """
+
+    print(f"length % chunk_size = {length % chunk_size}")
     hmac = HMAC(hmac_key, SHA256())
     hmac.update(initialisation_vector)
 
@@ -140,21 +142,80 @@ def decrypt_frame_payload(
     # Read the data, incrementally decrypting one chunk at a time
     while length > 0:
         this_chunk_length = min(chunk_size, length)
+        print(f"this_chunk_length = min({chunk_size}, {length}) = {this_chunk_length}")
         length -= this_chunk_length
         ciphertext = backup_file.read(this_chunk_length)
+        assert len(ciphertext) == this_chunk_length # this is going to fail...
 
         hmac.update(ciphertext)
-        yield decryptor.update(ciphertext)
+        yield decryptor.update(ciphertext) # weird that this....yields...before verifying the MAC isn't it?
 
     # Verify MAC
     their_mac = backup_file.read(10)
     our_mac = hmac.finalize()
     if their_mac != our_mac[: len(their_mac)]:
+        print("uh oh")
+        breakpoint()
         raise MACMismatchError()
 
     # Output final decrypted data
     yield decryptor.finalize()
 
+
+class SignedBlock:
+    def __init__(self, stream, length, hmac_key, cipher_key, initialisation_vector):
+        self._stream = stream
+        self._base = stream.tell()
+        self._length = length
+
+        # verify MAC
+        hmac = HMAC(hmac_key, SHA256())
+        hmac.update(initialisation_vector)
+
+        # Read the data, incrementally decrypting one chunk at a time
+        chunk_size: int = 8 * 1024
+        while length > 0:
+            chunk = stream.read(min(chunk_size, length)
+            length -= len(chunk)
+            hmac.update(chunk)
+        our_mac = hmac.finalize()
+
+        # Verify MAC
+        their_mac = stream.read(10)
+        if their_mac != our_mac[: len(their_mac)]:
+            raise MACMismatchError()
+
+        # *reset*
+        stream.seek(self._base)
+        # Output final decrypted data
+        yield decryptor.finalize()
+
+    def seek(self, pos):
+        self._stream.seek(pos + self._base) # ??
+
+    def tell(self):
+        return self._stream.tell() - self._base
+
+    def read(self, n):
+        # want self.tell() + n <= self._length
+        # so n <= self._length - self.tell()
+        # so n = max(n, 
+        n = max(n, self._length - self.tell())
+        chunk = self._stream.read(n)
+        if self.tell() >= self._length:
+            self.seek(10) # skip over the MAC # XXX this is probably wrong
+        return chunk
+
+# this is complicated by the desire to do streaming to disk, at least in some cases
+
+# then SignedBlock gets to be shared
+
+def verify_frame(backup_file, length):
+    # read a frame, verify its MAC
+    # maybe what I need is a kind of pseudo-file
+    # an IO stream that wraps {content,MAC} and a. verifies the MAC but b. just returns {content} when read
+    # and the key thing needs to be that when finished, the wrapped stream *skips over* the MAC
+    pos = 
 
 def parameter_to_native_type(
     parameter: SqlStatement.SqlParameter,
@@ -200,6 +261,7 @@ def decrypt_backup(
     attachments_directory = output_directory / "attachments"
     stickers_directory = output_directory / "stickers"
     avatars_directory = output_directory / "avatars"
+    keyValue_filename = output_directory / "keyValue.json"
 
     # Create output directories
     for directory in [
@@ -219,25 +281,67 @@ def decrypt_backup(
 
     # Preferences stored as a dictionary {<file>: {<key>: <value>, ...}, ...}
     preferences: Dict[str, Dict[str, str]] = {}
+    keyValue: Dict[str, object] = {}
 
-    # Work out basic cryptographic parameters
-    initialisation_vector, salt = read_backup_header(backup_file)
-    cipher_key, hmac_key = derive_keys(passphrase, salt)
+
+    def write_frame_payload(filename, length):
+        print(f"Attempting to write {filename}")
+        with open(filename+".part", "wb") as f:
+            # decrypt_frame_payload doesn't verify the MAC until *after* writing it all out to disk
+            # which violates moxie0's Cryptographic Doom Principle
+            # but the other alternatives are:
+            # 1. scan the payload, verify the mac, then use seek() to scan it again
+            # 2. buffer the entire payload in RAM, verify the MAC, if good, write it out
+            # 3. buffer the payload to a temp file on disk, verify the MAC, if good, rename it to the final file
+            try:
+                for data in decrypt_frame_payload(
+                    backup_file,
+                    length,
+                    hmac_key,
+                    cipher_key,
+                    initialisation_vector,
+                ):
+                    f.write(data)
+                else:
+                    # atomic rename XXX is this true on windows?
+                    os.rename(filename+".part", filename)
+            except MACMismatchError:
+                os.unlink(filename+".part")
+                raise
 
     # Begin decryption, one frame at a time
+    # There are also pseudo-frame 'payload's ((photos, movies, pdfs, ...), stickers, avatars)
     while True:
-        backup_frame = decrypt_frame(
-            backup_file, hmac_key, cipher_key, initialisation_vector
-        )
-        initialisation_vector = increment_initialisation_vector(initialisation_vector)
+        # this list of types can be found in Backups.proto -> message BackupFrame
+        # if that expands, this should too
 
-        if backup_frame.HasField("end"):
-            break
-        elif backup_frame.HasField("version"):
-            db_cursor.execute(
-                f"PRAGMA user_version = {backup_frame.version.version:d}",
-            )
+        #if i % 100 == 0: db_connection.commit() # flush data every 100 frames
+        
+        # hmm this is tricky, the IV needs to be incremented
+        # after each frame *or* payload
+        # but I would really like to split this giant if statement up into handler functions subcases
+        # it's simple enough with just frames
+        # but payloads are trickier
+
+        # I need a little state machine that does something like
+        # 
+        # a. read length bytes from the stream
+        # b. if expecting = header, run parse_header expecting == frame, run decrypt_frame
+        #   this means I have to move the 'read length bytes' out of decrypt_frame
+        #   if expecting == payload, run decrypt_payload
+        #    the difference between decrypt_frame and decrypt_payload is that decrypt_payload handles larger data, and therefore needs to stream direct to disk
+        #    is that actually true?
+        # c. increment IV
+
+        if backup_frame.HasField("header"):
+            if 'initialisation_vector' in locals():
+                raise ValueError("Backup header found in encrypted content.")
+            # Work out basic cryptographic parameters
+            initialisation_vector = backup_frame.header.iv
+            salt = backup_frame.header.salt
+            cipher_key, hmac_key = derive_keys(passphrase, salt)
         elif backup_frame.HasField("statement"):
+            # this will be the bulk of content: SQL statements, to be inserted directly into your SQL database
             statement = backup_frame.statement
             # Skip SQLite internal tables and full text search index tables
             assert isinstance(statement.statement, str)
@@ -255,42 +359,58 @@ def decrypt_backup(
             preferences.setdefault(preference.file, {})[
                 preference.key
             ] = preference.value
-        else:
-            if backup_frame.HasField("attachment"):
-                filename = (
-                    attachments_directory
-                    / f"{backup_frame.attachment.attachmentId}.bin"
-                )
-                length = backup_frame.attachment.length
-            elif backup_frame.HasField("sticker"):
-                filename = stickers_directory / f"{backup_frame.sticker.rowId}.bin"
-                length = backup_frame.sticker.length
-            elif backup_frame.HasField("avatar"):
-                filename = avatars_directory / f"{backup_frame.avatar.recipientId}.bin"
-                length = backup_frame.avatar.length
-            else:
-                assert False, "Invalid field type found."
-
-            with open(filename, "wb") as f:
-                for data in decrypt_frame_payload(
-                    backup_file,
-                    length,
-                    hmac_key,
-                    cipher_key,
-                    initialisation_vector,
-                ):
-                    f.write(data)
-            initialisation_vector = increment_initialisation_vector(
-                initialisation_vector
+        elif backup_frame.HasField("attachment"):
+            filename = (
+                attachments_directory
+                / f"{backup_frame.attachment.attachmentId}.bin"
             )
+            length = backup_frame.attachment.length
+        elif backup_frame.HasField("version"):
+            db_cursor.execute(
+                f"PRAGMA user_version = {backup_frame.version.version:d}",
+            )
+        if backup_frame.HasField("end"):
+            break
+        elif backup_frame.HasField("avatar"):
+            filename = avatars_directory / f"{backup_frame.avatar.recipientId}.bin"
+            length = backup_frame.avatar.length
+        elif backup_frame.HasField("sticker"):
+            filename = stickers_directory / f"{backup_frame.sticker.rowId}.bin"
+            length = backup_frame.sticker.length
+            write_frame_payload(backup_file, hmac_key, cipher_key, initialisation_vector, filename, length)
+        elif backup_frame.HasField("keyValue"):
+            key = backup_frame.keyValue.key
+            for type in ["blob","boolean","float","integer","long","string"]: # protobufs are awkward because you can't just ask them what type they are; they behave like a union type in C.
+                if backup_frame.keyValue.HasField(f"{type}Value"):
+                    key = getattr(backup_frame.keyValue, f'{type}Value')
+            else:
+                raise ValueError("Unrecognized keyValue type")
+            # now what?
+            keyValue[key] = value
+        else:
+            raise ValueError("Unknown frame type found.")
+
+        initialisation_vector = increment_initialisation_vector(
+            initialisation_vector
+        )
+
+        frame = 
+
+        # now depend
+        backup_frame = decrypt_frame(
+            frame, hmac_key, cipher_key, initialisation_vector
+        )
+        initialisation_vector = increment_initialisation_vector(initialisation_vector)
 
         # Yield to allow for e.g. printing progress information.
         yield
 
-    db_connection.commit()
+    db_connection.commit() # would be good to do this like, once in a while...
 
     with preferences_filename.open("w") as pf:
         json.dump(preferences, pf)
+    with keyValue_filename.open("w") as kv:
+        json.dump(keyValue, kv)
 
 
 def main() -> None:
@@ -342,7 +462,7 @@ def main() -> None:
     backup_file_size = args.backup_file.tell()
     args.backup_file.seek(0)
 
-    last_perc = ""
+    last_perc = "" # TODO: use tqdm for the progress bar
     try:
         for _ in decrypt_backup(
             args.backup_file, args.passphrase, args.output_directory
