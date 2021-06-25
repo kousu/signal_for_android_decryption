@@ -24,6 +24,7 @@ message ReactionList {
 }
 
 
+/*
 import "SignalService.proto";
 import "DecryptedGroups.proto";
 
@@ -33,6 +34,7 @@ message DecryptedGroupV2Context {
     DecryptedGroup               groupState         = 3;
     DecryptedGroup               previousGroupState = 4;
 }
+*/
 
 message TemporalAuthCredentialResponse {
     int32 date                   = 1;
