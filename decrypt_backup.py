@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Unofficial Signal for Android backup file decryption utility.
 
@@ -200,6 +202,7 @@ def decrypt_backup(
     attachments_directory = output_directory / "attachments"
     stickers_directory = output_directory / "stickers"
     avatars_directory = output_directory / "avatars"
+    keyValue_filename = output_directory / "keyValue.json"
 
     # Create output directories
     for directory in [
@@ -219,6 +222,7 @@ def decrypt_backup(
 
     # Preferences stored as a dictionary {<file>: {<key>: <value>, ...}, ...}
     preferences: Dict[str, Dict[str, str]] = {}
+    keyValue = {}
 
     # Work out basic cryptographic parameters
     initialisation_vector, salt = read_backup_header(backup_file)
@@ -255,6 +259,15 @@ def decrypt_backup(
             preferences.setdefault(preference.file, {})[
                 preference.key
             ] = preference.value
+        elif backup_frame.HasField("keyValue"):
+            key = backup_frame.keyValue.key
+            for type in ["blob","boolean","float","integer","long","string"]: # protobufs are awkward because you can't just ask them what type they are; they behave like a union type in C.
+                if backup_frame.keyValue.HasField(f"{type}Value"):
+                    value = getattr(backup_frame.keyValue, f'{type}Value')
+                    break
+            else:
+                raise ValueError("Unrecognized keyValue type")
+            keyValue[key] = value
         else:
             if backup_frame.HasField("attachment"):
                 filename = (
@@ -291,7 +304,8 @@ def decrypt_backup(
 
     with preferences_filename.open("w") as pf:
         json.dump(preferences, pf)
-
+    with keyValue_filename.open("w") as kv:
+        json.dump(keyValue, kv)
 
 def main() -> None:
     """Main command-line interface."""

@@ -29,9 +29,10 @@ You can install the required Python dependencies as follows:
 
     $ pip install -r requirements.txt
 
-Optionally, you may rebuild the [Protocol
+Optionally, you may need to rebuild the [Protocol
 Buffer](https://developers.google.com/protocol-buffers) Python module:
 
+    $ curl -JLO https://raw.githubusercontent.com/signalapp/Signal-Android/master/app/src/main/proto/Backups.proto
     $ protoc -I=. --python_out=. Backups.proto
 
 
