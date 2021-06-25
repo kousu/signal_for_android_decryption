@@ -35,6 +35,9 @@ from cryptography.hazmat.primitives.ciphers.algorithms import AES
 from cryptography.hazmat.primitives.ciphers.modes import CTR
 
 from Backups_pb2 import BackupFrame, SqlStatement  # type: ignore
+from Database_pb2 import ChatColor
+
+from google.protobuf.json_format import MessageToJson
 
 
 class HeaderData(NamedTuple):
@@ -304,8 +307,22 @@ def decrypt_backup(
 
     with preferences_filename.open("w") as pf:
         json.dump(preferences, pf)
+
+    # convert embedded protobufs to something json-compatible
+    # this is a dumb format.
+    if 'chat_colors.chat_colors' in keyValue:
+      B = keyValue['chat_colors.chat_colors']
+      b = ChatColor.FromString(B)
+      J = MessageToJson(b)
+      j = json.loads(J)
+      keyValue['chat_colors.chat_colors'] = j
+    
+# keyValue =
+# {'pin.pin_reminders_enabled': True, 'settings.link_previews': False, 'pref_trim_length': 1000, 'pref_trim_threads': True, 'settings.backups.enabled': True, 'settings.universal.expire.timer': 604800, 'chat_colors.chat_colors': b"\x12%\r\xc4\xb4'C\x12\x14\xf2\xe6\x99\xf9\xff\xff\xff\xff\xff\x01\xb2\xd9\x84\xfc\xff\xff\xff\xff\xff\x01\x1a\x08\x00\x00\x00\x00\x00\x00\x80?", 'chat_colors.chat_colors.id': 1, 'chat_colors.auto.tooltip': False, 'chat_colors.gradient.tooltip': False}
+
     print(keyValue)
     breakpoint()
+    
     with keyValue_filename.open("w") as kv:
         json.dump(keyValue, kv)
 
